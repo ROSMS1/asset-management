@@ -1,9 +1,8 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import plotly.express as px
 from datetime import date, datetime
-import os
+from supabase import create_client, Client
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -13,9 +12,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "asset_management.db")
+# ─── CONNEXION SUPABASE ───────────────────────────────────────────────────────
+@st.cache_resource
+def get_supabase() -> Client:
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
 
-# ─── CONSTANTES (modèle Asset Database) ──────────────────────────────────────
+supabase = get_supabase()
+
+# ─── CONSTANTES ───────────────────────────────────────────────────────────────
 REGIONS       = ["SOUTH", "PNR", "BRAZZAVILLE_POOL", "NORTH_CENTRE", "NORTH"]
 NETWORK_TYPES = ["ZTE", "HUAWEI", "ERICSSON", "NOKIA", "MTN"]
 STATUSES      = ["OK", "NOK", "Faulty", "Missing", "Under Repair"]
@@ -35,69 +41,28 @@ OEM_VENDORS = [
     "LEROY SOMER", "SACRED SUN", "SHOTO", "EPROTECH", "ZTE",
     "HUAWEI", "Other"
 ]
-MOVEMENT_TYPES   = ["Site → Site", "Site → Warehouse", "Warehouse → Site", "Site → Repair", "Repair → Site"]
+MOVEMENT_TYPES    = ["Site → Site", "Site → Warehouse", "Warehouse → Site", "Site → Repair", "Repair → Site"]
 MOVEMENT_STATUSES = ["En Transit", "Livré", "Confirmé", "Annulé"]
 
-# ─── DATABASE ─────────────────────────────────────────────────────────────────
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+# ─── HELPERS SUPABASE ─────────────────────────────────────────────────────────
+def load_assets() -> pd.DataFrame:
+    res = supabase.table("assets").select("*").order("id", desc=True).execute()
+    if res.data:
+        return pd.DataFrame(res.data)
+    cols = ["id","site_id","site_name","region","serial_number","part_number",
+            "item_description","oem_vendor","item_name","network_type",
+            "status","install_date","comments","created_at"]
+    return pd.DataFrame(columns=cols)
 
-def init_db():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS assets (
-        id               INTEGER PRIMARY KEY AUTOINCREMENT,
-        site_id          TEXT NOT NULL,
-        site_name        TEXT NOT NULL,
-        region           TEXT,
-        serial_number    TEXT,
-        part_number      TEXT,
-        item_description TEXT,
-        oem_vendor       TEXT,
-        item_name        TEXT,
-        network_type     TEXT,
-        status           TEXT DEFAULT 'OK',
-        install_date     TEXT,
-        comments         TEXT,
-        created_at       TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS spare_movements (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        movement_date   TEXT NOT NULL,
-        movement_type   TEXT,
-        item_description TEXT,
-        serial_number   TEXT,
-        part_number     TEXT,
-        oem_vendor      TEXT,
-        qty             INTEGER DEFAULT 1,
-        from_site_id    TEXT,
-        from_site_name  TEXT,
-        to_site_id      TEXT,
-        to_site_name    TEXT,
-        reason          TEXT,
-        technician      TEXT,
-        status          TEXT DEFAULT 'En Transit',
-        reception_date  TEXT,
-        comments        TEXT,
-        created_at      TEXT
-    )""")
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
-def load_assets():
-    conn = get_conn()
-    df = pd.read_sql("SELECT * FROM assets ORDER BY id DESC", conn)
-    conn.close()
-    return df
-
-def load_movements():
-    conn = get_conn()
-    df = pd.read_sql("SELECT * FROM spare_movements ORDER BY movement_date DESC", conn)
-    conn.close()
-    return df
+def load_movements() -> pd.DataFrame:
+    res = supabase.table("spare_movements").select("*").order("movement_date", desc=True).execute()
+    if res.data:
+        return pd.DataFrame(res.data)
+    cols = ["id","movement_date","movement_type","item_description","serial_number",
+            "part_number","oem_vendor","qty","from_site_id","from_site_name",
+            "to_site_id","to_site_name","reason","technician","status",
+            "reception_date","comments","created_at"]
+    return pd.DataFrame(columns=cols)
 
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -146,6 +111,7 @@ with st.sidebar:
     ])
     st.markdown("---")
     st.markdown(f"📅 **{date.today().strftime('%d/%m/%Y')}**")
+    st.markdown("🗄️ *Base : Supabase Cloud*")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD
@@ -183,8 +149,7 @@ if page == "🏠 Dashboard":
                 st.markdown('<div class="sec-title">Assets par Item Name</div>', unsafe_allow_html=True)
                 item_df = df["item_name"].value_counts().reset_index()
                 item_df.columns = ["Item", "Nombre"]
-                fig1 = px.bar(item_df, x="Item", y="Nombre",
-                              color_discrete_sequence=["#0f3460"])
+                fig1 = px.bar(item_df, x="Item", y="Nombre", color_discrete_sequence=["#0f3460"])
                 fig1.update_layout(margin=dict(t=10,b=10), height=280, xaxis_title="", yaxis_title="")
                 st.plotly_chart(fig1, use_container_width=True)
 
@@ -193,8 +158,7 @@ if page == "🏠 Dashboard":
                 reg_df = df.groupby(["region","status"]).size().reset_index(name="n")
                 fig2 = px.bar(reg_df, x="region", y="n", color="status", barmode="stack",
                               color_discrete_map={"OK":"#38a169","NOK":"#e53e3e",
-                                                  "Faulty":"#dd6b20","Missing":"#c53030",
-                                                  "Under Repair":"#d69e2e"})
+                                                  "Faulty":"#dd6b20","Missing":"#c53030","Under Repair":"#d69e2e"})
                 fig2.update_layout(margin=dict(t=10,b=10), height=280, xaxis_title="", yaxis_title="")
                 st.plotly_chart(fig2, use_container_width=True)
 
@@ -214,12 +178,10 @@ if page == "🏠 Dashboard":
                 st.markdown('<div class="sec-title">Mouvements par Type</div>', unsafe_allow_html=True)
                 mt_df = mdf["movement_type"].value_counts().reset_index()
                 mt_df.columns = ["Type","Nombre"]
-                fig4 = px.bar(mt_df, x="Type", y="Nombre",
-                              color_discrete_sequence=["#6b46c1"])
+                fig4 = px.bar(mt_df, x="Type", y="Nombre", color_discrete_sequence=["#6b46c1"])
                 fig4.update_layout(margin=dict(t=10,b=10), height=270, xaxis_title="", yaxis_title="")
                 st.plotly_chart(fig4, use_container_width=True)
 
-        # Derniers mouvements
         if total_moves > 0:
             st.markdown('<div class="sec-title">5 Derniers Mouvements</div>', unsafe_allow_html=True)
             cols_mv = ["movement_date","movement_type","item_description",
@@ -227,8 +189,7 @@ if page == "🏠 Dashboard":
             st.dataframe(mdf[cols_mv].head(5).rename(columns={
                 "movement_date":"Date","movement_type":"Type",
                 "item_description":"Article","from_site_name":"De",
-                "to_site_name":"Vers","qty":"Qté",
-                "status":"Statut","technician":"Technicien"
+                "to_site_name":"Vers","qty":"Qté","status":"Statut","technician":"Technicien"
             }), use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -264,8 +225,8 @@ elif page == "➕ Nouvel Asset":
             oem_vendor_choice = st.selectbox("OEM Vendor", OEM_VENDORS)
             if oem_vendor_choice == "Other":
                 oem_vendor_choice = st.text_input("Précisez le Vendor")
-        with r4c2: network_type  = st.selectbox("Network Type", NETWORK_TYPES)
-        with r4c3: status        = st.selectbox("Status", STATUSES)
+        with r4c2: network_type = st.selectbox("Network Type", NETWORK_TYPES)
+        with r4c3: status       = st.selectbox("Status", STATUSES)
 
         install_date = st.date_input("Install Date", value=date.today())
         comments     = st.text_area("Comments", height=70)
@@ -274,18 +235,21 @@ elif page == "➕ Nouvel Asset":
             if not site_id.strip() or not site_name.strip():
                 st.error("⚠️ Site ID et Site Name sont obligatoires.")
             else:
-                conn = get_conn()
-                conn.execute("""
-                    INSERT INTO assets
-                    (site_id, site_name, region, serial_number, part_number,
-                     item_description, oem_vendor, item_name, network_type,
-                     status, install_date, comments, created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (site_id.strip(), site_name.strip(), region, serial_number,
-                      part_number, item_desc_choice, oem_vendor_choice,
-                      item_name_choice, network_type, status,
-                      install_date.isoformat(), comments, now_str()))
-                conn.commit(); conn.close()
+                supabase.table("assets").insert({
+                    "site_id": site_id.strip(),
+                    "site_name": site_name.strip(),
+                    "region": region,
+                    "serial_number": serial_number,
+                    "part_number": part_number,
+                    "item_description": item_desc_choice,
+                    "oem_vendor": oem_vendor_choice,
+                    "item_name": item_name_choice,
+                    "network_type": network_type,
+                    "status": status,
+                    "install_date": install_date.isoformat(),
+                    "comments": comments,
+                    "created_at": now_str()
+                }).execute()
                 st.success("✅ Asset enregistré avec succès !")
                 st.balloons()
 
@@ -301,10 +265,10 @@ elif page == "📋 Base de Données Assets":
     else:
         st.markdown("### 🔍 Filtres")
         fc1, fc2, fc3, fc4 = st.columns(4)
-        with fc1: f_region = st.multiselect("Région",       REGIONS)
-        with fc2: f_status = st.multiselect("Statut",       STATUSES)
-        with fc3: f_item   = st.multiselect("Item Name",    ITEM_NAMES)
-        with fc4: f_vendor = st.multiselect("OEM Vendor",   OEM_VENDORS)
+        with fc1: f_region = st.multiselect("Région",     REGIONS)
+        with fc2: f_status = st.multiselect("Statut",     STATUSES)
+        with fc3: f_item   = st.multiselect("Item Name",  ITEM_NAMES)
+        with fc4: f_vendor = st.multiselect("OEM Vendor", OEM_VENDORS)
 
         mask = pd.Series([True]*len(df))
         if f_region: mask &= df["region"].isin(f_region)
@@ -319,20 +283,18 @@ elif page == "📋 Base de Données Assets":
             "item_description","oem_vendor","item_name","network_type",
             "status","install_date","comments"
         ]].rename(columns={
-            "id":"SN","site_id":"Site ID","site_name":"Site Name",
-            "region":"Region","serial_number":"Serial Number",
-            "part_number":"Part Number","item_description":"Item Description",
-            "oem_vendor":"OEM Vendor","item_name":"Item Name",
-            "network_type":"Network Type","status":"Status",
-            "install_date":"Install Date","comments":"Comments"
+            "id":"SN","site_id":"Site ID","site_name":"Site Name","region":"Region",
+            "serial_number":"Serial Number","part_number":"Part Number",
+            "item_description":"Item Description","oem_vendor":"OEM Vendor",
+            "item_name":"Item Name","network_type":"Network Type",
+            "status":"Status","install_date":"Install Date","comments":"Comments"
         }), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("### ✏️ Mettre à jour un Asset")
         id_list = filtered["id"].tolist()
         if id_list:
-            sel = st.selectbox("Sélectionner l'Asset (SN)",
-                id_list,
+            sel = st.selectbox("Sélectionner l'Asset (SN)", id_list,
                 format_func=lambda x: f"#{x} – {df[df['id']==x]['site_name'].values[0]} – {df[df['id']==x]['item_description'].values[0]}")
             row = df[df["id"]==sel].iloc[0]
             with st.form(f"edit_asset_{sel}"):
@@ -344,13 +306,14 @@ elif page == "📋 Base de Données Assets":
                 with ec3: new_part   = st.text_input("Part Number",   value=row["part_number"] or "")
                 new_comments = st.text_area("Comments", value=row["comments"] or "")
                 if st.form_submit_button("💾 Sauvegarder", type="primary"):
-                    conn = get_conn()
-                    conn.execute("""
-                        UPDATE assets SET status=?, serial_number=?,
-                        part_number=?, comments=? WHERE id=?
-                    """, (new_status, new_serial, new_part, new_comments, sel))
-                    conn.commit(); conn.close()
-                    st.success("✅ Asset mis à jour !"); st.rerun()
+                    supabase.table("assets").update({
+                        "status": new_status,
+                        "serial_number": new_serial,
+                        "part_number": new_part,
+                        "comments": new_comments
+                    }).eq("id", int(sel)).execute()
+                    st.success("✅ Asset mis à jour !")
+                    st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MOUVEMENT SPARE PARTS — LISTE
@@ -364,9 +327,9 @@ elif page == "🔄 Mouvement Spare Parts":
     else:
         st.markdown("### 🔍 Filtres")
         mc1, mc2, mc3 = st.columns(3)
-        with mc1: f_mtype  = st.multiselect("Type de Mouvement", MOVEMENT_TYPES)
-        with mc2: f_mst    = st.multiselect("Statut",            MOVEMENT_STATUSES)
-        with mc3: f_mitem  = st.text_input("Rechercher un Article", placeholder="ex: DG battery")
+        with mc1: f_mtype = st.multiselect("Type de Mouvement", MOVEMENT_TYPES)
+        with mc2: f_mst   = st.multiselect("Statut",            MOVEMENT_STATUSES)
+        with mc3: f_mitem = st.text_input("Rechercher un Article", placeholder="ex: DG battery")
 
         mmask = pd.Series([True]*len(mdf))
         if f_mtype: mmask &= mdf["movement_type"].isin(f_mtype)
@@ -375,8 +338,6 @@ elif page == "🔄 Mouvement Spare Parts":
         filtered_m = mdf[mmask]
 
         st.markdown(f"**{len(filtered_m)} mouvement(s)**")
-
-        # Affichage en cartes visuelles
         for _, r in filtered_m.iterrows():
             css = {"En Transit":"transit","Livré":"livre",
                    "Confirmé":"confirme","Annulé":"annule"}.get(r["status"], "")
@@ -405,8 +366,7 @@ elif page == "🔄 Mouvement Spare Parts":
         st.markdown("### ✏️ Mettre à jour le statut d'un mouvement")
         mid_list = filtered_m["id"].tolist()
         if mid_list:
-            sel_m = st.selectbox("Sélectionner le Mouvement",
-                mid_list,
+            sel_m = st.selectbox("Sélectionner le Mouvement", mid_list,
                 format_func=lambda x: f"#{x} – {mdf[mdf['id']==x]['item_description'].values[0]} – {mdf[mdf['id']==x]['from_site_name'].values[0]} → {mdf[mdf['id']==x]['to_site_name'].values[0]}")
             mrow = mdf[mdf["id"]==sel_m].iloc[0]
             with st.form(f"upd_mv_{sel_m}"):
@@ -418,15 +378,13 @@ elif page == "🔄 Mouvement Spare Parts":
                     new_recep = st.date_input("Date de Réception", value=date.today())
                 new_mcomments = st.text_area("Commentaires", value=mrow["comments"] or "")
                 if st.form_submit_button("💾 Mettre à Jour", type="primary"):
-                    conn = get_conn()
-                    conn.execute("""
-                        UPDATE spare_movements SET status=?, reception_date=?, comments=?
-                        WHERE id=?
-                    """, (new_mst,
-                          new_recep.isoformat() if new_mst in ["Livré","Confirmé"] else mrow["reception_date"],
-                          new_mcomments, sel_m))
-                    conn.commit(); conn.close()
-                    st.success("✅ Mouvement mis à jour !"); st.rerun()
+                    supabase.table("spare_movements").update({
+                        "status": new_mst,
+                        "reception_date": new_recep.isoformat() if new_mst in ["Livré","Confirmé"] else mrow["reception_date"],
+                        "comments": new_mcomments
+                    }).eq("id", int(sel_m)).execute()
+                    st.success("✅ Mouvement mis à jour !")
+                    st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NOUVEAU MOUVEMENT SPARE PART
@@ -445,12 +403,9 @@ elif page == "➕ Nouveau Mouvement":
         with nm2: mv_type = st.selectbox("Type de Mouvement *", MOVEMENT_TYPES)
 
         st.markdown('<div class="sec-title">🔩 Article / Spare Part</div>', unsafe_allow_html=True)
-
-        # Option : lier à un asset existant
         link_asset = st.checkbox("Lier à un asset existant de la base de données")
         if link_asset and not assets_df.empty:
-            asset_sel = st.selectbox("Sélectionner l'Asset",
-                assets_df["id"].tolist(),
+            asset_sel = st.selectbox("Sélectionner l'Asset", assets_df["id"].tolist(),
                 format_func=lambda x: f"#{x} – {assets_df[assets_df['id']==x]['site_name'].values[0]} – {assets_df[assets_df['id']==x]['item_description'].values[0]} – S/N: {assets_df[assets_df['id']==x]['serial_number'].values[0]}")
             asset_row = assets_df[assets_df["id"]==asset_sel].iloc[0]
             mv_item   = asset_row["item_description"]
@@ -475,11 +430,11 @@ elif page == "➕ Nouveau Mouvement":
         sc1, sc2 = st.columns(2)
         with sc1:
             st.markdown("**🔴 Site de Départ**")
-            from_site_id   = st.text_input("Site ID Départ *", placeholder="ex: 4126")
+            from_site_id   = st.text_input("Site ID Départ *",   placeholder="ex: 4126")
             from_site_name = st.text_input("Site Name Départ *", placeholder="ex: AQUARIUM")
         with sc2:
             st.markdown("**🟢 Site de Destination**")
-            to_site_id   = st.text_input("Site ID Destination *", placeholder="ex: 4036")
+            to_site_id   = st.text_input("Site ID Destination *",   placeholder="ex: 4036")
             to_site_name = st.text_input("Site Name Destination *", placeholder="ex: BANDZOKO")
 
         st.markdown('<div class="sec-title">👤 Responsabilité & Raison</div>', unsafe_allow_html=True)
@@ -501,22 +456,25 @@ elif page == "➕ Nouveau Mouvement":
             elif not mv_reason.strip():
                 st.error("⚠️ La raison du mouvement est obligatoire.")
             else:
-                conn = get_conn()
-                conn.execute("""
-                    INSERT INTO spare_movements
-                    (movement_date, movement_type, item_description, serial_number,
-                     part_number, oem_vendor, qty, from_site_id, from_site_name,
-                     to_site_id, to_site_name, reason, technician, status,
-                     reception_date, comments, created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (mv_date.isoformat(), mv_type, mv_item, mv_serial,
-                      mv_part, mv_vendor, mv_qty,
-                      from_site_id.strip(), from_site_name.strip(),
-                      to_site_id.strip(), to_site_name.strip(),
-                      mv_reason, mv_technician, mv_status,
-                      reception_date.isoformat() if reception_date else None,
-                      mv_comments, now_str()))
-                conn.commit(); conn.close()
+                supabase.table("spare_movements").insert({
+                    "movement_date": mv_date.isoformat(),
+                    "movement_type": mv_type,
+                    "item_description": mv_item,
+                    "serial_number": mv_serial,
+                    "part_number": mv_part,
+                    "oem_vendor": mv_vendor,
+                    "qty": int(mv_qty),
+                    "from_site_id": from_site_id.strip(),
+                    "from_site_name": from_site_name.strip(),
+                    "to_site_id": to_site_id.strip(),
+                    "to_site_name": to_site_name.strip(),
+                    "reason": mv_reason,
+                    "technician": mv_technician,
+                    "status": mv_status,
+                    "reception_date": reception_date.isoformat() if reception_date else None,
+                    "comments": mv_comments,
+                    "created_at": now_str()
+                }).execute()
                 st.success("✅ Mouvement enregistré avec succès !")
                 st.balloons()
 
@@ -536,21 +494,16 @@ elif page == "📊 Rapports":
         else:
             sites = df["site_name"].unique().tolist()
             sel_site = st.selectbox("Sélectionner un Site", ["Tous"] + sites)
-            if sel_site != "Tous":
-                site_df = df[df["site_name"] == sel_site]
-            else:
-                site_df = df
+            site_df = df[df["site_name"] == sel_site] if sel_site != "Tous" else df
             st.markdown(f"**{len(site_df)} assets** pour **{sel_site}**")
             st.dataframe(site_df[[
                 "site_id","site_name","region","serial_number",
-                "item_description","oem_vendor","item_name",
-                "network_type","status","install_date"
+                "item_description","oem_vendor","item_name","network_type","status","install_date"
             ]].rename(columns={
                 "site_id":"Site ID","site_name":"Site","region":"Région",
                 "serial_number":"S/N","item_description":"Description",
                 "oem_vendor":"Vendor","item_name":"Item",
-                "network_type":"Network","status":"Status",
-                "install_date":"Install Date"
+                "network_type":"Network","status":"Status","install_date":"Install Date"
             }), use_container_width=True, hide_index=True)
 
     with tab2:
@@ -558,15 +511,13 @@ elif page == "📊 Rapports":
             st.info("Aucun mouvement.")
         else:
             st.dataframe(mdf[[
-                "movement_date","movement_type","item_description",
-                "serial_number","qty","from_site_name","to_site_name",
-                "technician","status","reception_date","reason","comments"
+                "movement_date","movement_type","item_description","serial_number",
+                "qty","from_site_name","to_site_name","technician","status",
+                "reception_date","reason","comments"
             ]].rename(columns={
-                "movement_date":"Date","movement_type":"Type",
-                "item_description":"Article","serial_number":"S/N",
-                "qty":"Qté","from_site_name":"De","to_site_name":"Vers",
-                "technician":"Technicien","status":"Statut",
-                "reception_date":"Date Réception",
+                "movement_date":"Date","movement_type":"Type","item_description":"Article",
+                "serial_number":"S/N","qty":"Qté","from_site_name":"De","to_site_name":"Vers",
+                "technician":"Technicien","status":"Statut","reception_date":"Date Réception",
                 "reason":"Raison","comments":"Commentaires"
             }), use_container_width=True, hide_index=True)
 
